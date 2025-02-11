@@ -38,16 +38,17 @@ def print_banner() -> None:
                               | |              
                               |_| {COLORS['END']}"""
     print(banner)
-    print(f"{COLORS['YELLOW']}Port Scanner Professional v3.0{COLORS['END']}\n")
+    print(f"{COLORS['YELLOW']}Port Scanner Pro - System Identifier v2.0{COLORS['END']}\n")
 
 def os_ttl_guess(ttl: int) -> str:
     """Intenta adivinar el SO basado en el TTL."""
     return OS_TTL.get(ttl, "Desconocido")
 
 def run_traceroute(target: str) -> None:
-    """Ejecuta traceroute usando Scapy."""
+    """Ejecuta traceroute usando Scapy con paquetes UDP (para evitar restricciones en Windows)."""
     print(f"\n{COLORS['BLUE']}[*] Iniciando traceroute a {target}...{COLORS['END']}")
-    ans, _ = traceroute(target, maxttl=30, verbose=0)
+    # Usamos UDP (puerto 33434) para evitar restricciones de TCP en raw sockets en Windows.
+    ans, _ = traceroute(target, dport=33434, maxttl=30, verbose=0)
     for snd, rcv in ans:
         print(f"TTL: {snd.ttl} | IP: {rcv.src}")
 
@@ -70,23 +71,65 @@ def scan_port(ip: str, port: int, timeout: float = 1.0) -> Dict[str, str]:
         pkt = IP(dst=ip)/TCP(dport=port, flags="S")
         response = sr1(pkt, timeout=timeout, verbose=0)
         if response and response.haslayer(TCP):
-            if response.getlayer(TCP).flags == 0x12:  # SYN-ACK
+            # Si se recibe SYN-ACK (flag 0x12), el puerto está abierto.
+            if response.getlayer(TCP).flags == 0x12:
                 result["status"] = "open"
-                result["service"] = socket.getservbyport(port, "tcp")
-                sr(IP(dst=ip)/TCP(dport=port, flags="R"), timeout=1, verbose=0)  # Cierra conexión
+                try:
+                    result["service"] = socket.getservbyport(port, "tcp")
+                except Exception:
+                    result["service"] = "unknown"
+                # Enviar RST para cerrar la conexión sin completar el handshake.
+                sr(IP(dst=ip)/TCP(dport=port, flags="R"), timeout=1, verbose=0)
     except Exception as e:
         result["status"] = "error"
         result["error"] = str(e)
     return result
 
+def parse_ports(ports_str: str) -> List[int]:
+    """
+    Convierte una cadena de puertos a una lista de enteros.
+    Ejemplos:
+      "80,443"  -> [80, 443]
+      "1-1024"  -> [1, 2, ..., 1024]
+    """
+    ports = []
+    if '-' in ports_str:
+        parts = ports_str.split('-')
+        start = int(parts[0])
+        end = int(parts[1])
+        ports = list(range(start, end + 1))
+    elif ',' in ports_str:
+        parts = ports_str.split(',')
+        ports = [int(p.strip()) for p in parts]
+    else:
+        ports = [int(ports_str)]
+    return ports
+
+def scan_ports_multithread(target: str, ports: List[int], workers: int = 100) -> List[Dict[str, str]]:
+    """Escanea múltiples puertos utilizando ThreadPoolExecutor."""
+    results = []
+    print(f"\n{COLORS['BLUE']}[*] Iniciando escaneo de puertos en {target}...{COLORS['END']}")
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        future_to_port = {executor.submit(scan_port, target, port): port for port in ports}
+        for future in future_to_port:
+            try:
+                result = future.result()
+                if result["status"] == "open":
+                    print(f"🔵 Puerto {result['port']} abierto ({result['service']})")
+                results.append(result)
+            except Exception as e:
+                port = future_to_port[future]
+                print(f"Error en puerto {port}: {e}")
+    return results
+
 def parse_arguments() -> argparse.Namespace:
     """Configura los argumentos de línea de comandos."""
     parser = argparse.ArgumentParser(
         description="Port Scanner Pro - Escaneo de puertos, traceroute y detección de SO",
-        epilog="Ejemplo: python port_scanner_pro.py -t 192.168.1.1 -p 80 -tr -s"
+        epilog="Ejemplo: python SystemIdentifierV2.py -t 192.168.1.1 -p 1-1024 -tr -s"
     )
     parser.add_argument("-t", "--target", required=True, help="IP o rango (ej: 192.168.1.1 o 192.168.1.0/24)")
-    parser.add_argument("-p", "--ports", default="1-1024", help="Puertos a escanear (ej: 80,443 o 1-1000)")
+    parser.add_argument("-p", "--ports", default="1-1024", help="Puertos a escanear (ej: 80,443 o 1-1024)")
     parser.add_argument("-o", "--output", help="Archivo de salida JSON")
     parser.add_argument("-T", "--threads", type=int, default=100, help="Número de hilos")
     parser.add_argument("-tr", "--traceroute", action="store_true", help="Ejecutar traceroute")
@@ -96,18 +139,26 @@ def parse_arguments() -> argparse.Namespace:
 def main() -> None:
     print_banner()
     args = parse_arguments()
+    target = args.target.split("/")[0]  # Si se pasa un rango, usar solo la IP base
 
-    # Ejecutar traceroute si se especificó
+    # Ejecutar traceroute si se especifica.
     if args.traceroute:
-        run_traceroute(args.target.split("/")[0])  # Usa solo la IP base
+        run_traceroute(target)
 
-    # Detectar SO si se especificó
+    # Ejecutar detección de SO si se especifica.
     if args.os_detect:
-        detect_os(args.target.split("/")[0])
+        detect_os(target)
 
-    # Escaneo de puertos (similar a la versión anterior)
-    # ... (incluir aquí el resto de funciones como scan_network, parse_ports, etc.)
+    # Escaneo de puertos.
+    if args.ports:
+        ports_list = parse_ports(args.ports)
+        print(f"\n{COLORS['BLUE']}[*] Escaneando puertos en {target}: {ports_list[0]} - {ports_list[-1]}{COLORS['END']}")
+        scan_results = scan_ports_multithread(target, ports_list, args.threads)
+        # Si se especifica un archivo de salida, guardamos los resultados en formato JSON.
+        if args.output:
+            with open(args.output, 'w') as f:
+                json.dump(scan_results, f, indent=4)
 
 if __name__ == "__main__":
-    conf.verb = 0  # Desactiva logs de Scapy
+    conf.verb = 0  # Desactiva logs verbosos de Scapy
     main()
