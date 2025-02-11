@@ -28,9 +28,10 @@ una herramienta de red profesional desarrollada en Python que combina funcionali
 ## Instalación
 
 1. **Clona el repositorio:**
-
+IMPORTANTE A LA HORA DE EJECUTAR EL SCRIPT EN MOO ADMINISTRADOR
    ```bash
    git clone https://github.com/kidaa2020/PortOper.git
    cd PortOper
    pip install -r requirements.txt
    PortOper -h
+   
