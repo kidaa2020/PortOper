@@ -32,3 +32,5 @@ una herramienta de red profesional desarrollada en Python que combina funcionali
    ```bash
    git clone https://github.com/kidaa2020/PortOper.git
    cd PortOper
+   pip install -r requirements.txt
+   PortOper -h
